@@ -19,37 +19,63 @@ import java.util.stream.IntStream;
  * Tests HNSW against vectors from the Texmex dataset
  */
 public class Texmex {
-    public static void testRecall(List<float[]> baseVectors, List<float[]> queryVectors, List<Set<Integer>> groundTruth) throws IOException, ExecutionException, InterruptedException {
-        var ravv = new ListRandomAccessVectorValues(baseVectors, baseVectors.get(0).length);
-        var topK = 10; // groundTruth.get(0).size();
 
+    //final static String model = "/Users/andreyyegorov/src/FINGER/fashion-mnist-784-euclidean.hdf5";
+    final static String model = "/Users/andreyyegorov/src/FINGER/nytimes-256-angular.hdf5";
+    //final static String model = "/Users/andreyyegorov/src/FINGER/glove-100-angular.hdf5";
+    final static int M = 16;
+    final static int beamWidth = 60;
+    final static int lshDimensions = 64;
+
+    final static int queryRuns = 1;
+    final static int topK = 10; // groundTruth.get(0).size();
+    final static int searchMultiplier = 1;
+
+    public static void testRecall(List<float[]> baseVectors, List<float[]> queryVectors, List<Set<Integer>> groundTruth) throws IOException, ExecutionException, InterruptedException {
+
+        //Texmex.lshDimensions = baseVectors.get(0).length;
+
+        var ravv = new ListRandomAccessVectorValues(baseVectors, baseVectors.get(0).length);
+
+        System.out.println("ConcurrentHnswGraphBuilder.create()");
         var start = System.nanoTime();
-        var builder = ConcurrentHnswGraphBuilder.create(ravv, VectorEncoding.FLOAT32, VectorSimilarityFunction.DOT_PRODUCT, 128, 512);
+        var builder = ConcurrentHnswGraphBuilder.create(ravv, VectorEncoding.FLOAT32, VectorSimilarityFunction.DOT_PRODUCT, M, beamWidth);
         int buildThreads = 24;
         var es = Executors.newFixedThreadPool(
                 buildThreads, new NamedThreadFactory("Concurrent HNSW builder"));
         var hnsw = builder.buildAsync(ravv.copy(), es, buildThreads).get().getView();
         es.shutdown();
         long buildNanos = System.nanoTime() - start;
+        System.out.println("ConcurrentHnswGraphBuilder.create() took " + buildNanos / 1_000_000_000.0 + " seconds");
 
+        Texmex.QueryResult pqr;
+        long queryNanos;
+        double noFmRecall = 1.0d;
+        double recall;
+
+        System.out.println("new FingerMetadata()");
         start = System.nanoTime();
-        FingerMetadata<float[]> fm = new FingerMetadata<>(hnsw, ravv, VectorEncoding.FLOAT32, VectorSimilarityFunction.DOT_PRODUCT, 64);
+        System.out.format("M = %d, beamWidth = %d, lshDimensions = %d%n", M, beamWidth, lshDimensions);
+        FingerMetadata<float[]> fm = new FingerMetadata<>(hnsw, ravv, VectorEncoding.FLOAT32, VectorSimilarityFunction.DOT_PRODUCT, lshDimensions);
         long fingerNanos = System.nanoTime() - start;
+        System.out.println("new FingerMetadata() took " + fingerNanos / 1_000_000_000.0 + " seconds");
 
-        int queryRuns = 10;
+        System.out.println("performQueries() without fm");
         start = System.nanoTime();
-        var pqr = performQueries(queryVectors, groundTruth, ravv, hnsw, null, topK, queryRuns);
-        long queryNanos = System.nanoTime() - start;
-        var recall = ((double) pqr.topKFound) / (queryRuns * queryVectors.size() * topK);
-        System.out.format("Without Finger: top %d recall %.4f, build %.2fs, finger %.2fs, query %.2fs. %s exact similarity evals and %s approx%n",
-                topK, recall, buildNanos / 1_000_000_000.0, fingerNanos / 1_000_000_000.0, queryNanos / 1_000_000_000.0, pqr.exactSimilarities, pqr.approxSimilarities);
+        pqr = performQueries(queryVectors, groundTruth, ravv, hnsw, null, topK, queryRuns);
+        queryNanos = System.nanoTime() - start;
+        noFmRecall = ((double) pqr.topKFound) / (queryRuns * queryVectors.size() * topK);
+        System.out.format("Without Finger: top %d recall %.4f, build %.2fs, query %.2fs. %s exact similarity evals and %s approx%n",
+                topK, noFmRecall, buildNanos / 1_000_000_000.0, queryNanos / 1_000_000_000.0, pqr.exactSimilarities, pqr.approxSimilarities);
 
+        System.out.println("performQueries() with fm");
         start = System.nanoTime();
         pqr = performQueries(queryVectors, groundTruth, ravv, hnsw, fm, topK, queryRuns);
         queryNanos = System.nanoTime() - start;
         recall = ((double) pqr.topKFound) / (queryRuns * queryVectors.size() * topK);
-        System.out.format("Witho Finger: top %d recall %.4f, build %.2fs, finger %.2fs, query %.2fs. %s exact similarity evals and %s approx%n",
+        System.out.format("With Finger: top %d recall %.4f, build %.2fs, finger %.2fs, query %.2fs. %s exact similarity evals and %s approx%n",
                 topK, recall, buildNanos / 1_000_000_000.0, fingerNanos / 1_000_000_000.0, queryNanos / 1_000_000_000.0, pqr.exactSimilarities, pqr.approxSimilarities);
+        System.out.format("Finger recall change: %.4f (%.4f%%) %n", recall - noFmRecall, 100 * (recall - noFmRecall) / noFmRecall);
     }
 
     private static float normOf(float[] baseVector) {
@@ -66,18 +92,18 @@ public class Texmex {
         int topKfound = 0;
         int exactSimilarities = 0;
         int approxSimilarities = 0;
+        HnswSearcher<float[]> searcher = new HnswSearcher.Builder<>(hnsw, beamWidth, ravv, VectorEncoding.FLOAT32, VectorSimilarityFunction.DOT_PRODUCT)
+                .withFinger(fm)
+                .build();
         for (int k = 0; k < queryRuns; k++) {
-            HnswSearcher<float[]> searcher = new HnswSearcher.Builder<>(hnsw, ravv, VectorEncoding.FLOAT32, VectorSimilarityFunction.DOT_PRODUCT)
-                        .withFinger(fm)
-                        .build();
             for (int i = 0; i < queryVectors.size(); i++) {
                 var queryVector = queryVectors.get(i);
                 NeighborQueue nn;
-                nn = searcher.search(queryVector, topK, null, Integer.MAX_VALUE);
+                nn = searcher.search(queryVector, searchMultiplier * topK, null, Integer.MAX_VALUE);
 
                 var gt = groundTruth.get(i);
                 int[] resultNodes = nn.nodes();
-                var n = IntStream.range(0, Math.min(nn.size(), topK)).filter(j -> gt.contains(resultNodes[j])).count();
+                var n = IntStream.range(0, Math.min(nn.size(), searchMultiplier * topK)).filter(j -> gt.contains(resultNodes[j])).count();
                 topKfound += n;
             }
             exactSimilarities += searcher.exactSimilarityCalls.intValue();
@@ -87,6 +113,7 @@ public class Texmex {
     }
 
     private static void computeRecallFor(String pathStr) throws IOException, ExecutionException, InterruptedException {
+        System.out.println("Loading " + pathStr);
         float[][] baseVectors;
         float[][] queryVectors;
         int[][] groundTruth;
@@ -145,36 +172,9 @@ public class Texmex {
         }
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         System.out.println("Heap space available is " + Runtime.getRuntime().maxMemory());
 
-        new Thread(() -> {
-            try {
-                computeRecallFor("hdf5/nytimes-256-angular.hdf5");
-            } catch (Throwable e) {
-                throw new RuntimeException(e);
-            }
-        }).run();
-//        new Thread(() -> {
-//            try {
-//                computeRecallFor("hdf5/glove-100-angular.hdf5");
-//            } catch (Throwable e) {
-//                throw new RuntimeException(e);
-//            }
-//        }).run();
-//        new Thread(() -> {
-//            try {
-//                computeRecallFor("hdf5/glove-200-angular.hdf5");
-//            } catch (Throwable e) {
-//                throw new RuntimeException(e);
-//            }
-//        }).run();
-//        new Thread(() -> {
-//            try {
-//                computeRecallFor("hdf5/deep-image-96-angular.hdf5");
-//            } catch (Throwable e) {
-//                throw new RuntimeException(e);
-//            }
-//        }).start();
+        computeRecallFor(model);
     }
 }
