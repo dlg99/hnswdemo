@@ -21,10 +21,11 @@ import java.util.stream.IntStream;
 public class Texmex {
 
     //final static String model = "/Users/andreyyegorov/src/FINGER/fashion-mnist-784-euclidean.hdf5";
-    final static String model = "/Users/andreyyegorov/src/FINGER/nytimes-256-angular.hdf5";
+    //final static String model = "/Users/andreyyegorov/src/FINGER/nytimes-256-angular.hdf5";
     //final static String model = "/Users/andreyyegorov/src/FINGER/glove-100-angular.hdf5";
+    final static String model = "/Users/andreyyegorov/src/FINGER/lastfm-64-dot.hdf5";
     final static int M = 16;
-    final static int beamWidth = 60;
+    final static int beamWidth = 10;
     final static int lshDimensions = 64;
 
     final static int queryRuns = 1;
@@ -92,7 +93,7 @@ public class Texmex {
         int topKfound = 0;
         int exactSimilarities = 0;
         int approxSimilarities = 0;
-        HnswSearcher<float[]> searcher = new HnswSearcher.Builder<>(hnsw, beamWidth, ravv, VectorEncoding.FLOAT32, VectorSimilarityFunction.DOT_PRODUCT)
+        HnswSearcher<float[]> searcher = new HnswSearcher.Builder<>(hnsw, ravv, VectorEncoding.FLOAT32, VectorSimilarityFunction.DOT_PRODUCT)
                 .withFinger(fm)
                 .build();
         for (int k = 0; k < queryRuns; k++) {
@@ -119,7 +120,20 @@ public class Texmex {
         int[][] groundTruth;
         try (HdfFile hdf = new HdfFile(Paths.get(pathStr))) {
             baseVectors = (float[][]) hdf.getDatasetByPath("train").getData();
-            queryVectors = (float[][]) hdf.getDatasetByPath("test").getData();
+
+            if (model.contains("lastfm-64-dot")) {
+                double[][] qVectors = (double[][]) hdf.getDatasetByPath("test").getData();
+                queryVectors = new float[qVectors.length][];
+                for (int i = 0; i < qVectors.length; i++) {
+                    queryVectors[i] = new float[qVectors[i].length];
+                    for (int j = 0; j < qVectors[i].length; j++) {
+                        queryVectors[i][j] = (float) qVectors[i][j];
+                    }
+                }
+            } else {
+                queryVectors = (float[][]) hdf.getDatasetByPath("test").getData();
+            }
+
             groundTruth = (int[][]) hdf.getDatasetByPath("neighbors").getData();
         }
 
